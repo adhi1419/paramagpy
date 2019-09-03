@@ -1,6 +1,11 @@
+import warnings
+from random import randint
+
 import numpy as np
 from Bio.PDB import PDBParser
 from Bio.PDB.Atom import Atom, DisorderedAtom
+from Bio.PDB.PDBExceptions import PDBConstructionWarning, PDBConstructionException
+from Bio.PDB.Residue import Residue, DisorderedResidue
 from Bio.PDB.Structure import Structure
 from Bio.PDB.StructureBuilder import StructureBuilder
 
@@ -172,6 +177,19 @@ class CustomAtom(Atom):
         p2 = (1. / distance ** 3) * np.identity(3)
         return (preFactor * (3. * p1 - p2))
 
+    def bonded_to(self, valency=None):
+        # TO-DO: Documentation
+        valency_lib = {
+            'H': 1,
+            'N': 3,
+            'C': 4,
+            'O': 2,
+            'S': 2
+        }
+        valency = valency if valency is not None else valency_lib.get(self.element)
+        if valency is not None:
+            return self.parent.bonded_to(self, valency)
+
 
 class CustomStructure(Structure):
     """This is an overload hack of the BioPython Structure object"""
@@ -224,6 +242,51 @@ class CustomStructure(Structure):
         return data
 
 
+class CustomResidue(Residue):
+    """Paramagpy wrapper for BioPython's Residue entity"""
+
+    def __init__(self, *arg, **kwargs):
+        super().__init__(*arg, **kwargs)
+
+    def bonded_to(self, source_atom, valency):
+        def dist(from_atom):
+            return np.abs(from_atom - source_atom)
+
+        def quick_select(start, end, val):
+            if start >= end:
+                return None
+
+            mid = partition(start, end, randint(start, end))
+            bucket_a_len = mid - start + 1
+
+            if valency < bucket_a_len:
+                quick_select(start, mid - 1, val)
+            elif valency > bucket_a_len:
+                quick_select(mid + 1, end, val - bucket_a_len)
+
+        def partition(start, end, rnd):
+            atoms[start], atoms[rnd] = atoms[rnd], atoms[start]
+            _start = start
+            pivot = dist(atoms[start])
+
+            start += 1
+            while True:
+                while start < end and dist(atoms[start]) < pivot:
+                    start += 1
+                while start <= end and dist(atoms[end]) >= pivot:
+                    end -= 1
+                if start >= end: break
+                atoms[start], atoms[end] = atoms[end], atoms[start]
+
+            atoms[_start], atoms[end] = atoms[end], atoms[_start]
+            return end
+
+        atoms = list(atom for atom in self.get_atoms() if dist(atom) < 1.8)
+        atoms.remove(source_atom)
+        quick_select(0, len(atoms) - 1, valency)
+        return atoms[:valency]
+
+
 class CustomStructureBuilder(StructureBuilder):
     """This is an overload hack of BioPython's CustomStructureBuilder"""
 
@@ -232,6 +295,76 @@ class CustomStructureBuilder(StructureBuilder):
 
     def init_structure(self, structure_id):
         self.structure = CustomStructure(structure_id)
+
+    def init_residue(self, resname, field, resseq, icode):
+        """Create a new Residue object.
+
+        Arguments:
+         - resname - string, e.g. "ASN"
+         - field - hetero flag, "W" for waters, "H" for
+           hetero residues, otherwise blank.
+         - resseq - int, sequence identifier
+         - icode - string, insertion code
+
+        """
+        if field != " ":
+            if field == "H":
+                # The hetero field consists of H_ + the residue name (e.g. H_FUC)
+                field = "H_" + resname
+        res_id = (field, resseq, icode)
+        if field == " ":
+            if self.chain.has_id(res_id):
+                # There already is a residue with the id (field, resseq, icode).
+                # This only makes sense in the case of a point mutation.
+                warnings.warn("WARNING: Residue ('%s', %i, '%s') "
+                              "redefined at line %i."
+                              % (field, resseq, icode, self.line_counter),
+                              PDBConstructionWarning)
+                duplicate_residue = self.chain[res_id]
+                if duplicate_residue.is_disordered() == 2:
+                    # The residue in the chain is a DisorderedResidue object.
+                    # So just add the last Residue object.
+                    if duplicate_residue.disordered_has_id(resname):
+                        # The residue was already made
+                        self.residue = duplicate_residue
+                        duplicate_residue.disordered_select(resname)
+                    else:
+                        # Make a new residue and add it to the already
+                        # present DisorderedResidue
+                        new_residue = CustomResidue(res_id, resname, self.segid)
+                        duplicate_residue.disordered_add(new_residue)
+                        self.residue = duplicate_residue
+                        return
+                else:
+                    if resname == duplicate_residue.resname:
+                        warnings.warn("WARNING: Residue ('%s', %i, '%s','%s')"
+                                      " already defined with the same name "
+                                      "at line  %i."
+                                      % (field, resseq, icode, resname,
+                                         self.line_counter),
+                                      PDBConstructionWarning)
+                        self.residue = duplicate_residue
+                        return
+                    # Make a new DisorderedResidue object and put all
+                    # the Residue objects with the id (field, resseq, icode) in it.
+                    # These residues each should have non-blank altlocs for all their atoms.
+                    # If not, the PDB file probably contains an error.
+                    if not self._is_completely_disordered(duplicate_residue):
+                        # if this exception is ignored, a residue will be missing
+                        self.residue = None
+                        raise PDBConstructionException(
+                            "Blank altlocs in duplicate residue %s ('%s', %i, '%s')"
+                            % (resname, field, resseq, icode))
+                    self.chain.detach_child(res_id)
+                    new_residue = CustomResidue(res_id, resname, self.segid)
+                    disordered_residue = DisorderedResidue(res_id)
+                    self.chain.add(disordered_residue)
+                    disordered_residue.disordered_add(duplicate_residue)
+                    disordered_residue.disordered_add(new_residue)
+                    self.residue = disordered_residue
+                    return
+        self.residue = CustomResidue(res_id, resname, self.segid)
+        self.chain.add(self.residue)
 
     def init_atom(self, name, coord, b_factor, occupancy, altloc, fullname,
                   serial_number=None, element=None):
