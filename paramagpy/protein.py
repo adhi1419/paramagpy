@@ -49,6 +49,14 @@ class CustomAtom(Atom):
         'N': (np.array([-62.8, -45.7, 108.5]) * 1E-6, 19. * (np.pi / 180.)),
         'C': (np.array([-86.5, 11.8, 74.7]) * 1E-6, 38. * (np.pi / 180.))}
 
+    valency_lib = {
+        'H': 1,
+        'N': 3,
+        'C': 4,
+        'O': 2,
+        'S': 2
+    }
+
     """docstring for CustomAtom"""
 
     def __init__(self, *arg, **kwargs):
@@ -56,6 +64,7 @@ class CustomAtom(Atom):
         self.coord = np.asarray(self.coord, dtype=np.float64)
         self.gamma = self.gyro_lib.get(self.element, 0.0)
         self._csa = None
+        self.valency = self.valency_lib.get(self.element)
 
     def __repr__(self):
         return "<Atom {0:3d}-{1:}>".format(self.parent.id[1], self.name)
@@ -179,16 +188,7 @@ class CustomAtom(Atom):
 
     def bonded_to(self, valency=None):
         # TO-DO: Documentation
-        valency_lib = {
-            'H': 1,
-            'N': 3,
-            'C': 4,
-            'O': 2,
-            'S': 2
-        }
-        valency = valency if valency is not None else valency_lib.get(self.element)
-        if valency is not None:
-            return self.parent.bonded_to(self, valency)
+        return self.parent.bonded_to(self, self.valency if valency is None else valency)
 
 
 class CustomStructure(Structure):
@@ -248,7 +248,8 @@ class CustomResidue(Residue):
     def __init__(self, *arg, **kwargs):
         super().__init__(*arg, **kwargs)
 
-    def bonded_to(self, source_atom, valency):
+    def bonded_to(self, source_atom, valency=None):
+        # TO-DO documentation
         def dist(from_atom):
             return np.abs(from_atom - source_atom)
 
@@ -275,14 +276,33 @@ class CustomResidue(Residue):
                     start += 1
                 while start <= end and dist(atoms[end]) >= pivot:
                     end -= 1
-                if start >= end: break
+                if start >= end:
+                    break
                 atoms[start], atoms[end] = atoms[end], atoms[start]
 
             atoms[_start], atoms[end] = atoms[end], atoms[_start]
             return end
 
-        atoms = list(atom for atom in self.get_atoms() if dist(atom) < 1.8)
-        atoms.remove(source_atom)
+        # If id is supplied instead of CustomAtom, convert accordingly
+        if type(source_atom) is str:
+            source_atom = self[source_atom] if self.has_id(source_atom) else None
+
+        # Error handling
+
+        # If source_atom is not part of the residue, raise an exception
+        if source_atom not in self.child_list:
+            raise ValueError("source_atom is not part of this residue, call this function with a valid source")
+
+        # If valency isn't provided, use the CustomAtom instance's valency
+        # If still not available, throw an exception (or possibly return atoms at distance < 1.8E-10)
+        valency = source_atom.valency if valency is None else valency
+        if valency is None:
+            raise ValueError(
+                "Couldn't obtain valency for this source atom, call this function with the valency parameter")
+
+        # Only look for the nearest atoms at distance < 1.8E-10
+        # dist > 0 ensures the source_atom itself isn't considered
+        atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.8]
         quick_select(0, len(atoms) - 1, valency)
         return atoms[:valency]
 
