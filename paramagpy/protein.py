@@ -3,6 +3,7 @@ from random import randint
 
 import numpy as np
 from Bio.PDB import PDBParser
+from Bio.PDB import vectors
 from Bio.PDB.Atom import Atom, DisorderedAtom
 from Bio.PDB.PDBExceptions import PDBConstructionWarning, PDBConstructionException
 from Bio.PDB.Residue import Residue, DisorderedResidue
@@ -245,6 +246,34 @@ class CustomStructure(Structure):
 class CustomResidue(Residue):
     """Paramagpy wrapper for BioPython's Residue entity"""
 
+    # Atoms along the side-chain about which the atoms are to be rotated to generate different rotamers
+    # Prepend ['CA'] for all molecules
+    side_chain_lib = {
+        'GLY': [],
+        'ALA': [],
+        'SER': ['CB'],
+        'THR': ['CB'],
+        'CYS': ['CB'],
+        'VAL': ['CB'],
+        'LEU': ['CB', 'CG'],
+        'ILE': ['CB', 'CG'],
+        'MET': ['CB', 'CG', 'SD'],
+        'PRO': [],
+        'PHE': ['CB', 'CG'],
+        'TYR': ['CB', 'CG'],
+        'TRP': ['CB', 'CG'],
+        'ASP': ['CB', 'CG'],
+        'GLU': ['CB', 'CG', 'CD'],
+        'ASN': ['CB', 'CG'],
+        'GLN': ['CB', 'CG', 'CD'],
+        'HIS': ['CB', 'CG'],
+        'ARG': ['CB', 'CG', 'CD', 'NE'],
+        'LYS': ['CB', 'CG', 'CD', 'CE']
+    }
+
+    # Residue backbone
+    back_bone = ['N', 'C', 'O', 'CA']
+
     def __init__(self, *arg, **kwargs):
         super().__init__(*arg, **kwargs)
 
@@ -305,6 +334,48 @@ class CustomResidue(Residue):
         atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.8]
         quick_select(0, len(atoms) - 1, valency)
         return atoms[:valency]
+
+    """
+    # Can't use this approach as the vector about which the bond is to be rotated changes after
+    # rotation along a different bond
+    #
+    # These vectors represent the bonds (axis of rotation) along which the residue is rotated
+    def rot_vectors(self):
+        if self.get_resname() not in self.side_chain_lib:
+            raise Exception("Residue is not an amino acid, could be a hetero atom")
+        side_chain_atoms = list(map(lambda x: self[x], self.side_chain_lib[self.get_resname()]))
+        side_chain_vectors = list(map(lambda x: x.get_vector(), side_chain_atoms))
+        return np.diff([self['CA'].get_vector()] + side_chain_vectors).tolist()
+    """
+
+    def rot_residue(self, theta_vector):
+        # TO-DO Documentation
+
+        # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
+        # what is to be done
+        if self.get_resname() not in self.side_chain_lib:
+            raise Exception("Residue is not an amino acid, could be a hetero atom")
+
+        # If there is an alpha-H, don't rotate it and make it a part of the backbone
+        self.back_bone += ['HA'] if self.has_id('HA') else []
+
+        rot_path = [self['CA']] + list(map(lambda x: self[x], self.side_chain_lib[self.get_resname()]))
+        back_bone_atoms = list(map(lambda x: self[x], self.back_bone))
+
+        atoms_to_rotate = [atom for atom in self.get_atoms() if atom not in back_bone_atoms]
+
+        # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
+        if len(theta_vector) != len(rot_path) - 1:
+            raise AttributeError(f"The theta vector supplied is of invalid length. Expected: {len(rot_path) - 1}, "
+                                 f"Actual: {len(theta_vector)}")
+
+        for i in range(len(theta_vector)):
+            atoms_to_rotate.remove(rot_path[i + 1])
+            for atom in atoms_to_rotate:
+                # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
+                rot_vector = rot_path[i].get_vector() - rot_path[i + 1].get_vector()
+                rot_mat = vectors.rotaxis2m(theta_vector[i], rot_vector)
+                atom.set_coord(atom.get_vector().left_multiply(rot_mat).get_array())
 
 
 class CustomStructureBuilder(StructureBuilder):
