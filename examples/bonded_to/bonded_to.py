@@ -25,13 +25,17 @@ class Tracker:
             print(f"{atom} : {[x for x in atom.bonded_to()]}")
 
 
-prot = protein.load_pdb('../data_files/4icbH_mut_1.pdb')
-res = prot[0]['A'][74]
+def rad(deg): return (deg / 180) * pi
+
+
+prot = protein.load_pdb('../data_files/4icbH_mut.pdb')
+res = prot[0]['A'][55]
 
 trk = Tracker(res)
 
 trk.print_atom_linkage()
 trk.save_atom_coords()
-res.rot_residue([(30 / 180) * pi])
+res.set_rotamer([rad(18), rad(30), rad(0), rad(65)])
 trk.save_atom_coords()
 trk.print_atom_coords()
+trk.print_atom_linkage()

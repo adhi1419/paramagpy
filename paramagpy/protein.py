@@ -188,7 +188,7 @@ class CustomAtom(Atom):
         return (preFactor * (3. * p1 - p2))
 
     def bonded_to(self, valency=None):
-        # TO-DO: Documentation
+        # TODO: Documentation
         return self.parent.bonded_to(self, self.valency if valency is None else valency)
 
 
@@ -278,7 +278,7 @@ class CustomResidue(Residue):
         super().__init__(*arg, **kwargs)
 
     def bonded_to(self, source_atom, valency=None):
-        # TO-DO documentation
+        # TODO: Documentation
         def dist(from_atom):
             return np.abs(from_atom - source_atom)
 
@@ -348,21 +348,22 @@ class CustomResidue(Residue):
         return np.diff([self['CA'].get_vector()] + side_chain_vectors).tolist()
     """
 
-    def rot_residue(self, theta_vector):
-        # TO-DO Documentation
+    # Renaming to set_delta_dihedral or similar make more sense?
+    def set_rotamer(self, theta_vector):
+        # TODO Documentation
 
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
         # what is to be done
         if self.get_resname() not in self.side_chain_lib:
             raise Exception("Residue is not an amino acid, could be a hetero atom")
 
-        # If there is an alpha-H, don't rotate it and make it a part of the backbone
-        self.back_bone += ['HA'] if self.has_id('HA') else []
+        # If there is an amine-H, don't rotate it and make it a part of the backbone
+        self.back_bone += ['H'] if self.has_id('H') else []
 
         rot_path = [self['CA']] + list(map(lambda x: self[x], self.side_chain_lib[self.get_resname()]))
-        back_bone_atoms = list(map(lambda x: self[x], self.back_bone))
+        back_bone_atoms = set(map(lambda x: self[x], self.back_bone))
 
-        atoms_to_rotate = [atom for atom in self.get_atoms() if atom not in back_bone_atoms]
+        atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
 
         # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
         if len(theta_vector) != len(rot_path) - 1:
@@ -370,12 +371,18 @@ class CustomResidue(Residue):
                                  f"Actual: {len(theta_vector)}")
 
         for i in range(len(theta_vector)):
-            atoms_to_rotate.remove(rot_path[i + 1])
+            # Remove atoms which are bonded to the previous atom as they shouldn't be influenced
+            for atom in rot_path[i].bonded_to():
+                atoms_to_rotate.discard(atom)
+
+            # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
+            rot_vector = rot_path[i + 1].get_vector() - rot_path[i].get_vector()
+            rot_mat = vectors.rotaxis2m(theta_vector[i], rot_vector)
+
             for atom in atoms_to_rotate:
-                # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
-                rot_vector = rot_path[i].get_vector() - rot_path[i + 1].get_vector()
-                rot_mat = vectors.rotaxis2m(theta_vector[i], rot_vector)
-                atom.set_coord(atom.get_vector().left_multiply(rot_mat).get_array())
+                atom_coord = atom.get_vector() - rot_path[i].get_vector()
+                atom_coord_shifted = atom_coord.left_multiply(rot_mat) + rot_path[i].get_vector()
+                atom.set_coord(atom_coord_shifted.get_array())
 
 
 class CustomStructureBuilder(StructureBuilder):
