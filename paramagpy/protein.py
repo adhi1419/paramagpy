@@ -1,4 +1,5 @@
 import warnings
+from operator import attrgetter
 from random import randint
 
 import numpy as np
@@ -52,10 +53,19 @@ class CustomAtom(Atom):
 
     valency_lib = {
         'H': 1,
-        'N': 3,
         'C': 4,
+        'N': 3,
         'O': 2,
         'S': 2
+    }
+
+    # Priority order for choosing the atom to measure the dihedral angle from
+    atomic_number_lib = {
+        'H': 1,
+        'C': 6,
+        'N': 7,
+        'O': 8,
+        'S': 16
     }
 
     """docstring for CustomAtom"""
@@ -66,6 +76,8 @@ class CustomAtom(Atom):
         self.gamma = self.gyro_lib.get(self.element, 0.0)
         self._csa = None
         self.valency = self.valency_lib.get(self.element)
+        self.bonded_atoms = None
+        self.atomic_number = CustomAtom.atomic_number_lib.get(self.element)
 
     def __repr__(self):
         return "<Atom {0:3d}-{1:}>".format(self.parent.id[1], self.name)
@@ -187,9 +199,9 @@ class CustomAtom(Atom):
         p2 = (1. / distance ** 3) * np.identity(3)
         return (preFactor * (3. * p1 - p2))
 
-    def bonded_to(self, valency=None):
+    def bonded_to(self, valency=None, recompute=False):
         # TODO: Documentation
-        return self.parent.bonded_to(self, self.valency if valency is None else valency)
+        return self.parent.bonded_to(self, self.valency if valency is None else valency, recompute)
 
 
 class CustomStructure(Structure):
@@ -266,18 +278,18 @@ class CustomResidue(Residue):
         'GLU': ['CB', 'CG', 'CD'],
         'ASN': ['CB', 'CG'],
         'GLN': ['CB', 'CG', 'CD'],
-        'HIS': ['CB', 'CG'],
+        'HIS': ['CB', 'CG1'],
         'ARG': ['CB', 'CG', 'CD', 'NE'],
         'LYS': ['CB', 'CG', 'CD', 'CE']
     }
 
     # Residue backbone
-    back_bone = ['N', 'C', 'O', 'CA']
+    back_bone = set(['N', 'C', 'O', 'CA'])
 
     def __init__(self, *arg, **kwargs):
         super().__init__(*arg, **kwargs)
 
-    def bonded_to(self, source_atom, valency=None):
+    def bonded_to(self, source_atom, valency=None, recompute=False):
         # TODO: Documentation
         def dist(from_atom):
             return np.abs(from_atom - source_atom)
@@ -312,6 +324,10 @@ class CustomResidue(Residue):
             atoms[_start], atoms[end] = atoms[end], atoms[_start]
             return end
 
+        # If computed already, just return the list
+        if source_atom.bonded_atoms is not None and not recompute:
+            return source_atom.bonded_atoms.copy()
+
         # If id is supplied instead of CustomAtom, convert accordingly
         if type(source_atom) is str:
             source_atom = self[source_atom] if self.has_id(source_atom) else None
@@ -333,7 +349,8 @@ class CustomResidue(Residue):
         # dist > 0 ensures the source_atom itself isn't considered
         atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.8]
         quick_select(0, len(atoms) - 1, valency)
-        return atoms[:valency]
+        source_atom.bonded_atoms = atoms[:valency]
+        return source_atom.bonded_atoms.copy()
 
     """
     # Can't use this approach as the vector about which the bond is to be rotated changes after
@@ -348,41 +365,80 @@ class CustomResidue(Residue):
         return np.diff([self['CA'].get_vector()] + side_chain_vectors).tolist()
     """
 
-    # Renaming to set_delta_dihedral or similar make more sense?
-    def set_rotamer(self, theta_vector):
+    def set_dihedral(self, theta_vector):
+        # TODO Documentation
+
+        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+
+        # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
+        if len(theta_vector) != len(rot_path) - 1:
+            raise AttributeError(
+                f"The delta theta vector supplied is of invalid length. Expected: {len(rot_path) - 1}, "
+                f"Actual: {len(theta_vector)}")
+
+        current_dihedral_vector = [CustomResidue.get_dihedral(rot_path[i], rot_path[i + 1]) for i in
+                                   range(len(rot_path) - 1)]
+        delta_theta_vector = theta_vector - current_dihedral_vector
+        self.set_delta_dihedral(delta_theta_vector)
+
+    def set_delta_dihedral(self, delta_theta_vector):
         # TODO Documentation
 
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
         # what is to be done
-        if self.get_resname() not in self.side_chain_lib:
+        if self.get_resname() not in CustomResidue.side_chain_lib:
             raise Exception("Residue is not an amino acid, could be a hetero atom")
 
         # If there is an amine-H, don't rotate it and make it a part of the backbone
-        self.back_bone += ['H'] if self.has_id('H') else []
-
-        rot_path = [self['CA']] + list(map(lambda x: self[x], self.side_chain_lib[self.get_resname()]))
         back_bone_atoms = set(map(lambda x: self[x], self.back_bone))
+        iter_bb_atoms = back_bone_atoms.copy()
+
+        for atom in iter_bb_atoms:
+            for nbr in atom.bonded_to():
+                back_bone_atoms.add(nbr)
+
+        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
 
         atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
 
         # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
-        if len(theta_vector) != len(rot_path) - 1:
-            raise AttributeError(f"The theta vector supplied is of invalid length. Expected: {len(rot_path) - 1}, "
-                                 f"Actual: {len(theta_vector)}")
+        if len(delta_theta_vector) != len(rot_path) - 1:
+            raise AttributeError(
+                f"The delta theta vector supplied is of invalid length. Expected: {len(rot_path) - 1}, "
+                f"Actual: {len(delta_theta_vector)}")
 
-        for i in range(len(theta_vector)):
+        for i in range(len(delta_theta_vector)):
             # Remove atoms which are bonded to the previous atom as they shouldn't be influenced
             for atom in rot_path[i].bonded_to():
                 atoms_to_rotate.discard(atom)
 
             # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
             rot_vector = rot_path[i + 1].get_vector() - rot_path[i].get_vector()
-            rot_mat = vectors.rotaxis2m(theta_vector[i], rot_vector)
+            rot_mat = vectors.rotaxis2m(delta_theta_vector[i], rot_vector)
 
             for atom in atoms_to_rotate:
                 atom_coord = atom.get_vector() - rot_path[i].get_vector()
                 atom_coord_shifted = atom_coord.left_multiply(rot_mat) + rot_path[i].get_vector()
                 atom.set_coord(atom_coord_shifted.get_array())
+
+    @staticmethod
+    def get_dihedral(atom_a, atom_b):
+        atom_a_bonded_to = atom_a.bonded_to()
+        atom_b_bonded_to = atom_b.bonded_to()
+        print(atom_a_bonded_to, atom_b_bonded_to)
+
+        # Error Handling
+        if atom_a not in atom_b_bonded_to or atom_b not in atom_a_bonded_to:
+            raise AttributeError("Atom A and atom B have to bonded to each other for this to work")
+
+        atom_a_bonded_to.remove(atom_b)
+        atom_b_bonded_to.remove(atom_a)
+
+        list.sort(atom_a_bonded_to, key=attrgetter('atomic_number', 'name'))
+        list.sort(atom_b_bonded_to, key=attrgetter('atomic_number', 'name'))
+
+        return vectors.calc_dihedral(atom_a_bonded_to[0].get_vector(), atom_a.get_vector(), atom_b.get_vector(),
+                                     atom_b_bonded_to[0].get_vector())
 
 
 class CustomStructureBuilder(StructureBuilder):
