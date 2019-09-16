@@ -326,7 +326,7 @@ class CustomResidue(Residue):
 
         # If computed already, just return the list
         if source_atom.bonded_atoms is not None and not recompute:
-            return source_atom.bonded_atoms.copy()
+            return source_atom.bonded_atoms
 
         # If id is supplied instead of CustomAtom, convert accordingly
         if type(source_atom) is str:
@@ -350,7 +350,7 @@ class CustomResidue(Residue):
         atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.8]
         quick_select(0, len(atoms) - 1, valency)
         source_atom.bonded_atoms = atoms[:valency]
-        return source_atom.bonded_atoms.copy()
+        return source_atom.bonded_atoms
 
     """
     # Can't use this approach as the vector about which the bond is to be rotated changes after
@@ -412,20 +412,120 @@ class CustomResidue(Residue):
             for atom in rot_path[i].bonded_to():
                 atoms_to_rotate.discard(atom)
 
+            if delta_theta_vector[i] == 0:
+                continue
+
             # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
-            rot_vector = rot_path[i + 1].get_vector() - rot_path[i].get_vector()
-            rot_mat = vectors.rotaxis2m(delta_theta_vector[i], rot_vector)
+            rot_vector = rot_path[i + 1].coord - rot_path[i].coord
+            rot_mat = CustomResidue.rotaxis(delta_theta_vector[i], rot_vector)
 
             for atom in atoms_to_rotate:
-                atom_coord = atom.get_vector() - rot_path[i].get_vector()
-                atom_coord_shifted = atom_coord.left_multiply(rot_mat) + rot_path[i].get_vector()
-                atom.set_coord(atom_coord_shifted.get_array())
+                atom_coord = atom.coord - rot_path[i].coord
+                atom_coord_shifted = atom_coord @ rot_mat + rot_path[i].coord
+                atom.set_coord(atom_coord_shifted)
+
+    def grid_search_rotamer(self, angle_precision):
+        # TODO Documentation
+
+        # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
+        # what is to be done
+        if self.get_resname() not in CustomResidue.side_chain_lib:
+            raise Exception("Residue is not an amino acid, could be a hetero atom")
+
+        # If there is an amine-H, don't rotate it and make it a part of the backbone
+        back_bone_atoms = set(map(lambda x: self[x], self.back_bone))
+        iter_bb_atoms = back_bone_atoms.copy()
+
+        for atom in iter_bb_atoms:
+            for nbr in atom.bonded_to():
+                back_bone_atoms.add(nbr)
+
+        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+
+        atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
+        atoms_position = {}
+        for i in range(len(rot_path) - 1):
+            for atom in rot_path[i + 1].bonded_to():
+                if atom in atoms_to_rotate:
+                    atoms_position[atom] = i
+                atoms_to_rotate.discard(atom)
+
+        prev_arr = np.zeros(4)
+        for i in np.arange(0, 2 * np.pi, angle_precision):
+            for j in np.arange(0, 2 * np.pi, angle_precision):
+                for k in np.arange(0, 2 * np.pi, angle_precision):
+                    for l in np.arange(0, 2 * np.pi, angle_precision):
+                        curr_arr = np.array((i, j, k, l))
+                        CustomResidue.__grid_search_rotamer_helper(curr_arr - prev_arr, rot_path,
+                                                                   atoms_position)
+                        prev_arr = curr_arr
+
+    @staticmethod
+    def __grid_search_rotamer_helper(delta_theta_vector, rot_path, atoms_position):
+        # TODO Documentation
+        for i in range(len(delta_theta_vector)):
+            if delta_theta_vector[i] == 0:
+                continue
+
+            # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
+            rot_vector = rot_path[i + 1].coord - rot_path[i].coord
+            rot_mat = CustomResidue.rotaxis(delta_theta_vector[i], rot_vector)
+
+            for atom in atoms_position:
+                if i > atoms_position[atom]:
+                    continue
+                atom_coord = atom.coord - rot_path[i].coord
+                atom_coord_shifted = atom_coord @ rot_mat + rot_path[i].coord
+                atom.set_coord(atom_coord_shifted)
+
+    @staticmethod
+    def rotaxis(theta, vector):
+        """Calculate left multiplying rotation matrix.
+
+        Calculate a left multiplying rotation matrix that rotates
+        theta rad around vector.
+
+        :type theta: float
+        :param theta: the rotation angle
+
+        :type vector: L{Vector}
+        :param vector: the rotation axis
+
+        :return: The rotation matrix, a 3x3 Numeric array.
+
+        Examples
+        --------
+        >>> from numpy import pi
+        >>> from Bio.PDB.vectors import rotaxis2m
+        >>> from Bio.PDB.vectors import Vector
+        >>> m = rotaxis(pi, numpy.array([1, 0, 0]))
+        >>> numpy.dot(Vector(1, 2, 3), m)
+        <Vector 1.00, -2.00, -3.00>
+
+        """
+        v = vector / np.linalg.norm(vector)
+        c = np.cos(theta)
+        s = np.sin(theta)
+        t = 1 - c
+        rot = np.empty((3, 3))
+        # 1st row
+        rot[0, 0] = t * v[0] * v[0] + c
+        rot[0, 1] = t * v[0] * v[1] - s * v[2]
+        rot[0, 2] = t * v[0] * v[2] + s * v[1]
+        # 2nd row
+        rot[1, 0] = t * v[0] * v[1] + s * v[2]
+        rot[1, 1] = t * v[1] * v[1] + c
+        rot[1, 2] = t * v[1] * v[2] - s * v[0]
+        # 3rd row
+        rot[2, 0] = t * v[0] * v[2] - s * v[1]
+        rot[2, 1] = t * v[1] * v[2] + s * v[0]
+        rot[2, 2] = t * v[2] * v[2] + c
+        return rot
 
     @staticmethod
     def get_dihedral(atom_a, atom_b):
-        atom_a_bonded_to = atom_a.bonded_to()
-        atom_b_bonded_to = atom_b.bonded_to()
-        print(atom_a_bonded_to, atom_b_bonded_to)
+        atom_a_bonded_to = atom_a.bonded_to().copy()
+        atom_b_bonded_to = atom_b.bonded_to().copy()
 
         # Error Handling
         if atom_a not in atom_b_bonded_to or atom_b not in atom_a_bonded_to:
