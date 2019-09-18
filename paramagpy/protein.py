@@ -3,6 +3,7 @@ from operator import attrgetter
 from random import randint
 
 import numpy as np
+import quaternion as quat
 from Bio.PDB import PDBParser
 from Bio.PDB import vectors
 from Bio.PDB.Atom import Atom, DisorderedAtom
@@ -284,7 +285,7 @@ class CustomResidue(Residue):
     }
 
     # Residue backbone
-    back_bone = set(['N', 'C', 'O', 'CA'])
+    back_bone = {'N', 'C', 'O', 'CA'}
 
     def __init__(self, *arg, **kwargs):
         super().__init__(*arg, **kwargs)
@@ -400,6 +401,12 @@ class CustomResidue(Residue):
         rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
 
         atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
+        atoms_position = {}
+        for i in range(len(rot_path) - 1):
+            for atom in rot_path[i + 1].bonded_to():
+                if atom in atoms_to_rotate:
+                    atoms_position[atom] = i
+                atoms_to_rotate.discard(atom)
 
         # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
         if len(delta_theta_vector) != len(rot_path) - 1:
@@ -408,23 +415,16 @@ class CustomResidue(Residue):
                 f"Actual: {len(delta_theta_vector)}")
 
         for i in range(len(delta_theta_vector)):
-            # Remove atoms which are bonded to the previous atom as they shouldn't be influenced
-            for atom in rot_path[i].bonded_to():
-                atoms_to_rotate.discard(atom)
-
             if delta_theta_vector[i] == 0:
                 continue
 
             # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
             rot_vector = rot_path[i + 1].coord - rot_path[i].coord
-            rot_mat = CustomResidue.rotaxis(delta_theta_vector[i], rot_vector)
+            q = CustomResidue.__rot_quat(delta_theta_vector[i], rot_vector)
 
-            for atom in atoms_to_rotate:
-                atom_coord = atom.coord - rot_path[i].coord
-                atom_coord_shifted = atom_coord @ rot_mat + rot_path[i].coord
-                atom.set_coord(atom_coord_shifted)
+            CustomResidue.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
 
-    def grid_search_rotamer(self, angle_precision):
+    def grid_search_rotamer(self, steps_per_cycle):
         # TODO Documentation
 
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
@@ -442,6 +442,9 @@ class CustomResidue(Residue):
 
         rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
 
+        if len(rot_path) == 1:
+            return None
+
         atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
         atoms_position = {}
         for i in range(len(rot_path) - 1):
@@ -450,36 +453,34 @@ class CustomResidue(Residue):
                     atoms_position[atom] = i
                 atoms_to_rotate.discard(atom)
 
-        prev_arr = np.zeros(4)
-        for i in np.arange(0, 2 * np.pi, angle_precision):
-            for j in np.arange(0, 2 * np.pi, angle_precision):
-                for k in np.arange(0, 2 * np.pi, angle_precision):
-                    for l in np.arange(0, 2 * np.pi, angle_precision):
-                        curr_arr = np.array((i, j, k, l))
-                        CustomResidue.__grid_search_rotamer_helper(curr_arr - prev_arr, rot_path,
-                                                                   atoms_position)
-                        prev_arr = curr_arr
+        q1 = CustomResidue.__rot_quat((2 * np.pi) / steps_per_cycle, rot_path[1].coord - rot_path[0].coord)
+        CustomResidue.__grid_search_rotamer_helper(q1, 0, steps_per_cycle, rot_path, atoms_position)
 
     @staticmethod
-    def __grid_search_rotamer_helper(delta_theta_vector, rot_path, atoms_position):
+    def __grid_search_rotamer_helper(q, i, steps_per_cycle, rot_path, atoms_position):
         # TODO Documentation
-        for i in range(len(delta_theta_vector)):
-            if delta_theta_vector[i] == 0:
-                continue
-
-            # The rotation axis is "along the previous atom in rot_path and the current" (aka bond b/w the two)
-            rot_vector = rot_path[i + 1].coord - rot_path[i].coord
-            rot_mat = CustomResidue.rotaxis(delta_theta_vector[i], rot_vector)
-
-            for atom in atoms_position:
-                if i > atoms_position[atom]:
-                    continue
-                atom_coord = atom.coord - rot_path[i].coord
-                atom_coord_shifted = atom_coord @ rot_mat + rot_path[i].coord
-                atom.set_coord(atom_coord_shifted)
+        for j in range(steps_per_cycle):
+            if i + 1 < len(rot_path) - 1:
+                q_next = CustomResidue.__rot_quat((2 * np.pi) / steps_per_cycle,
+                                                  rot_path[i + 2].coord - rot_path[i + 1].coord)
+                CustomResidue.__grid_search_rotamer_helper(q_next, i + 1, steps_per_cycle, rot_path,
+                                                           atoms_position)
+            CustomResidue.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
 
     @staticmethod
-    def rotaxis(theta, vector):
+    def __rotate_atoms(atoms_position, i, q, origin):
+        # TODO Documentation
+        _q = quat.as_quat_array(np.empty(4))
+        _q.real = 0
+        for atom in atoms_position:
+            if i > atoms_position[atom]:
+                continue
+            _q.imag = atom.coord - origin
+            atom_coord_shifted = (q * _q * q.conj())
+            atom.set_coord(atom_coord_shifted.vec + origin)
+
+    @staticmethod
+    def __rot_quat(theta, vector):
         """Calculate left multiplying rotation matrix.
 
         Calculate a left multiplying rotation matrix that rotates
@@ -504,23 +505,12 @@ class CustomResidue(Residue):
 
         """
         v = vector / np.linalg.norm(vector)
-        c = np.cos(theta)
-        s = np.sin(theta)
-        t = 1 - c
-        rot = np.empty((3, 3))
-        # 1st row
-        rot[0, 0] = t * v[0] * v[0] + c
-        rot[0, 1] = t * v[0] * v[1] - s * v[2]
-        rot[0, 2] = t * v[0] * v[2] + s * v[1]
-        # 2nd row
-        rot[1, 0] = t * v[0] * v[1] + s * v[2]
-        rot[1, 1] = t * v[1] * v[1] + c
-        rot[1, 2] = t * v[1] * v[2] - s * v[0]
-        # 3rd row
-        rot[2, 0] = t * v[0] * v[2] - s * v[1]
-        rot[2, 1] = t * v[1] * v[2] + s * v[0]
-        rot[2, 2] = t * v[2] * v[2] + c
-        return rot
+        s = np.sin(theta / 2)
+        c = np.cos(theta / 2)
+        _q = quat.as_quat_array(np.empty(4))
+        _q.real = c
+        _q.imag = v * s
+        return _q
 
     @staticmethod
     def get_dihedral(atom_a, atom_b):
