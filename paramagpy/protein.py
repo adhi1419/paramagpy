@@ -1,3 +1,4 @@
+import heapq
 import warnings
 from operator import attrgetter
 from random import randint
@@ -5,7 +6,6 @@ from random import randint
 import numpy as np
 import quaternion as quat
 from Bio.PDB import PDBParser
-from Bio.PDB import vectors
 from Bio.PDB.Atom import Atom, DisorderedAtom
 from Bio.PDB.PDBExceptions import PDBConstructionWarning, PDBConstructionException
 from Bio.PDB.Residue import Residue, DisorderedResidue
@@ -21,6 +21,7 @@ def rotation_matrix(axis, theta):
     ----------
     axis : array of floats
         the [x,y,z] axis for rotation.
+    theta : angle of rotation about the axis
 
     Returns
     -------
@@ -269,7 +270,7 @@ class CustomResidue(Residue):
         'CYS': ['CB'],
         'VAL': ['CB'],
         'LEU': ['CB', 'CG'],
-        'ILE': ['CB', 'CG'],
+        'ILE': ['CB', 'CG1'],
         'MET': ['CB', 'CG', 'SD'],
         'PRO': [],
         'PHE': ['CB', 'CG'],
@@ -279,7 +280,7 @@ class CustomResidue(Residue):
         'GLU': ['CB', 'CG', 'CD'],
         'ASN': ['CB', 'CG'],
         'GLN': ['CB', 'CG', 'CD'],
-        'HIS': ['CB', 'CG1'],
+        'HIS': ['CB', 'CG'],
         'ARG': ['CB', 'CG', 'CD', 'NE'],
         'LYS': ['CB', 'CG', 'CD', 'CE']
     }
@@ -289,6 +290,12 @@ class CustomResidue(Residue):
 
     def __init__(self, *arg, **kwargs):
         super().__init__(*arg, **kwargs)
+        # These variables are set by fit.FitPCSToRotamer as and when required
+        self._dihedral_full = None
+        self._metal = None
+        self.pcs_data = None
+        self._min_pcs = None
+        self._rot_path = None
 
     def bonded_to(self, source_atom, valency=None, recompute=False):
         # TODO: Documentation
@@ -348,7 +355,7 @@ class CustomResidue(Residue):
 
         # Only look for the nearest atoms at distance < 1.8E-10
         # dist > 0 ensures the source_atom itself isn't considered
-        atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.8]
+        atoms = [atom for atom in self.get_atoms() if 0 < dist(atom) < 1.95]
         quick_select(0, len(atoms) - 1, valency)
         source_atom.bonded_atoms = atoms[:valency]
         return source_atom.bonded_atoms
@@ -369,7 +376,7 @@ class CustomResidue(Residue):
     def set_dihedral(self, theta_vector):
         # TODO Documentation
 
-        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+        rot_path = self.__get_rot_path()
 
         # Error Handling - Exit raising an AttributeError if the theta vector supplied is of invalid dimension
         if len(theta_vector) != len(rot_path) - 1:
@@ -377,8 +384,7 @@ class CustomResidue(Residue):
                 f"The delta theta vector supplied is of invalid length. Expected: {len(rot_path) - 1}, "
                 f"Actual: {len(theta_vector)}")
 
-        current_dihedral_vector = [CustomResidue.get_dihedral(rot_path[i], rot_path[i + 1]) for i in
-                                   range(len(rot_path) - 1)]
+        current_dihedral_vector = self.get_dihedral_full()
         delta_theta_vector = theta_vector - current_dihedral_vector
         self.set_delta_dihedral(delta_theta_vector)
 
@@ -398,7 +404,7 @@ class CustomResidue(Residue):
             for nbr in atom.bonded_to():
                 back_bone_atoms.add(nbr)
 
-        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+        rot_path = self.__get_rot_path()
 
         atoms_to_rotate = set(atom for atom in self.get_atoms() if atom not in back_bone_atoms)
         atoms_position = {}
@@ -422,9 +428,9 @@ class CustomResidue(Residue):
             rot_vector = rot_path[i + 1].coord - rot_path[i].coord
             q = CustomResidue.__rot_quat(delta_theta_vector[i], rot_vector)
 
-            CustomResidue.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
+            self.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
 
-    def grid_search_rotamer(self, steps_per_cycle):
+    def grid_search_rotamer(self, rotation_param, fit_pcs=False, top_n=1):
         # TODO Documentation
 
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
@@ -432,15 +438,22 @@ class CustomResidue(Residue):
         if self.get_resname() not in CustomResidue.side_chain_lib:
             raise Exception("Residue is not an amino acid, could be a hetero atom")
 
+        for _p in rotation_param:
+            if not -np.pi < _p[0] <= np.pi or not -np.pi < _p[1] <= np.pi:
+                raise AttributeError("The dihedral angles should be in range (-pi, pi]")
+            if _p[2] < 0:
+                raise AttributeError(
+                    "The steps for rotation cannot be negative. Note: 0 steps denotes no rotation about that bond")
+
         # If there is an amine-H, don't rotate it and make it a part of the backbone
         back_bone_atoms = set(map(lambda x: self[x], self.back_bone))
-        iter_bb_atoms = back_bone_atoms.copy()
+        iter_bb_atoms = set(back_bone_atoms)  # Copy to a new set to iterate over this while changing
 
         for atom in iter_bb_atoms:
             for nbr in atom.bonded_to():
                 back_bone_atoms.add(nbr)
 
-        rot_path = [self['CA']] + list(map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+        rot_path = self.__get_rot_path()
 
         if len(rot_path) == 1:
             return None
@@ -453,22 +466,40 @@ class CustomResidue(Residue):
                     atoms_position[atom] = i
                 atoms_to_rotate.discard(atom)
 
-        q1 = CustomResidue.__rot_quat((2 * np.pi) / steps_per_cycle, rot_path[1].coord - rot_path[0].coord)
-        CustomResidue.__grid_search_rotamer_helper(q1, 0, steps_per_cycle, rot_path, atoms_position)
+        self.set_dihedral(rotation_param[:, 0])
+        self._min_pcs = []
+        self._dihedral_full = np.array(rotation_param[:, 0])
 
-    @staticmethod
-    def __grid_search_rotamer_helper(q, i, steps_per_cycle, rot_path, atoms_position):
+        _param1 = rotation_param[0]
+        q1 = CustomResidue.__rot_quat(CustomResidue.__get_angle_increment(_param1[0], _param1[1], _param1[2]),
+                                      rot_path[1].coord - rot_path[0].coord)
+        self.__grid_search_rotamer_helper(q1, 0, rotation_param, rot_path, atoms_position, fit_pcs, top_n)
+
+        return self._min_pcs if fit_pcs and len(self._min_pcs) > 0 else None
+
+    def __grid_search_rotamer_helper(self, q, i, rotation_param, rot_path, atoms_position, fit_pcs=False, top_n=1):
         # TODO Documentation
-        for j in range(steps_per_cycle):
+        _param = rotation_param[i]
+        for j in range(1, int(_param[2])):
             if i + 1 < len(rot_path) - 1:
-                q_next = CustomResidue.__rot_quat((2 * np.pi) / steps_per_cycle,
-                                                  rot_path[i + 2].coord - rot_path[i + 1].coord)
-                CustomResidue.__grid_search_rotamer_helper(q_next, i + 1, steps_per_cycle, rot_path,
-                                                           atoms_position)
-            CustomResidue.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
+                _param1 = rotation_param[i + 1]
+                q_next = CustomResidue.__rot_quat(
+                    CustomResidue.__get_angle_increment(_param1[0], _param1[1], _param1[2]),
+                    rot_path[i + 2].coord - rot_path[i + 1].coord)
+                self.__grid_search_rotamer_helper(q_next, i + 1, rotation_param, rot_path,
+                                                  atoms_position, fit_pcs, top_n)
+            self._dihedral_full[i] += CustomResidue.__get_angle_increment(_param[0], _param[1], _param[2])
+            self._dihedral_full[i] -= 2 * np.pi if self._dihedral_full[i] > np.pi else 0
+            self.__rotate_atoms(atoms_position, i, q, rot_path[i].coord, fit_pcs, top_n)
 
-    @staticmethod
-    def __rotate_atoms(atoms_position, i, q, origin):
+        if int(_param[2]) != 0:
+            q_reset = CustomResidue.__rot_quat(2 * np.pi - (_param[1] - _param[0]),
+                                               rot_path[i + 1].coord - rot_path[i].coord)
+            self._dihedral_full[i] += 2 * np.pi - (_param[1] - _param[0])
+            self._dihedral_full[i] -= 2 * np.pi if self._dihedral_full[i] > np.pi else 0
+            self.__rotate_atoms(atoms_position, i, q_reset, rot_path[i].coord, fit_pcs, top_n)
+
+    def __rotate_atoms(self, atoms_position, i, q, origin, fit_pcs=False, top_n=1):
         # TODO Documentation
         _q = quat.as_quat_array(np.empty(4))
         _q.real = 0
@@ -479,31 +510,44 @@ class CustomResidue(Residue):
             atom_coord_shifted = (q * _q * q.conj())
             atom.set_coord(atom_coord_shifted.vec + origin)
 
+        if fit_pcs:
+            coord_matrix = np.empty((len(self.pcs_data[0]), 3))
+
+            for idx, tup in enumerate(self.pcs_data[0]):
+                coord_matrix[idx] = tup.position
+
+            pcs_calc = self._metal.fast_pcs(coord_matrix)
+            pcs_dist = np.linalg.norm(self.pcs_data[1] - pcs_calc)
+
+            if len(self._min_pcs) == top_n and -self._min_pcs[0][0] > pcs_dist:
+                heapq.heappop(self._min_pcs)
+                heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full)))
+            if len(self._min_pcs) < top_n:
+                heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full)))
+
+    def __get_rot_path(self):
+        if self._rot_path is None:
+            self._rot_path = [self['CA']] + list(
+                map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
+        return self._rot_path
+
+    def get_dihedral_full(self):
+        rot_path = self.__get_rot_path()
+        return [CustomResidue.get_dihedral(rot_path[i], rot_path[i + 1]) for i in range(len(rot_path) - 1)]
+
+    @staticmethod
+    def __get_angle_increment(start, stop, steps):
+        # TODO Documentation
+        if start == stop or int(steps) <= 1:
+            return 0
+        diff = (stop - start)
+        if diff < 0:
+            diff += 2 * np.pi
+        return diff / int(steps - 1)
+
     @staticmethod
     def __rot_quat(theta, vector):
-        """Calculate left multiplying rotation matrix.
-
-        Calculate a left multiplying rotation matrix that rotates
-        theta rad around vector.
-
-        :type theta: float
-        :param theta: the rotation angle
-
-        :type vector: L{Vector}
-        :param vector: the rotation axis
-
-        :return: The rotation matrix, a 3x3 Numeric array.
-
-        Examples
-        --------
-        >>> from numpy import pi
-        >>> from Bio.PDB.vectors import rotaxis2m
-        >>> from Bio.PDB.vectors import Vector
-        >>> m = rotaxis(pi, numpy.array([1, 0, 0]))
-        >>> numpy.dot(Vector(1, 2, 3), m)
-        <Vector 1.00, -2.00, -3.00>
-
-        """
+        # TODO: Documentation
         v = vector / np.linalg.norm(vector)
         s = np.sin(theta / 2)
         c = np.cos(theta / 2)
@@ -524,18 +568,38 @@ class CustomResidue(Residue):
         atom_a_bonded_to.remove(atom_b)
         atom_b_bonded_to.remove(atom_a)
 
-        list.sort(atom_a_bonded_to, key=attrgetter('atomic_number', 'name'))
-        list.sort(atom_b_bonded_to, key=attrgetter('atomic_number', 'name'))
+        list.sort(atom_a_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
+        list.sort(atom_b_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
 
-        return vectors.calc_dihedral(atom_a_bonded_to[0].get_vector(), atom_a.get_vector(), atom_b.get_vector(),
-                                     atom_b_bonded_to[0].get_vector())
+        if not atom_a_bonded_to:
+            raise Exception(f"Could not find the neighbors of {atom_a} to calculate the dihedral angle")
+
+        if not atom_b_bonded_to:
+            raise Exception(f"Could not find the neighbors of {atom_b} to calculate the dihedral angle")
+
+        return CustomResidue.__calc_dihedral(atom_a_bonded_to[0].coord, atom_a.coord, atom_b.coord,
+                                             atom_b_bonded_to[0].coord)
+
+    @staticmethod
+    def __calc_dihedral(v1, v2, v3, v4):
+        b = np.diff(np.array([v1, v2, v3, v4]), axis=0)
+        n1, n2 = np.cross(b[0], b[1]), np.cross(b[1], b[2])
+
+        # Our new co-ordinate frame (x, y, z) := (n1, n2, m1)
+        n1 /= np.linalg.norm(n1)
+        n2 /= np.linalg.norm(n2)
+        b[1] /= np.linalg.norm(b[1])
+        m1 = np.cross(n1, b[1])
+
+        return -np.arctan2(m1.dot(n2), n1.dot(n2))
 
 
 class CustomStructureBuilder(StructureBuilder):
     """This is an overload hack of BioPython's CustomStructureBuilder"""
 
     def __init__(self, *arg, **kwargs):
-        super().__init__(*arg, **kwargs)
+        super().__init__()
+        self.structure = None
 
     def init_structure(self, structure_id):
         self.structure = CustomStructure(structure_id)
