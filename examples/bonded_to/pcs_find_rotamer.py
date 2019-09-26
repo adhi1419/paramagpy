@@ -92,23 +92,42 @@ def fit_rotamer():
     trk.save_atom_coords()
 
     pr = cProfile.Profile()
-    pr.enable()
-    # Grid search 5 degrees about each staggered position
-    min_pcs = pcs_fitter.run_staggered_positions_search('A', 6, 0.174533, 5)
-    pr.disable()
-    pr.print_stats(sort="cumtime")
 
-    pr.clear()
-    pr.enable()
-    rot_param = np.array([[0, -2 / 9 * np.pi, 9]] * 4)
-    pcs_fitter.set_rotation_parameter('A', 6, rot_param)
-    result = pcs_fitter.run_grid_search()
-    pr.disable()
-    pr.print_stats(sort="cumtime")
+    def staggered_positions_search():
+        pr.clear()
+        pr.enable()
+        # Grid search 5 degrees about each staggered position
+        min_pcs = pcs_fitter.run_staggered_positions_search('A', 6, 0.174533, 5)
+        pr.disable()
+        pr.print_stats(sort="cumtime")
+        print(min_pcs)
+
+    def grid_search():
+        pr.clear()
+        pr.enable()
+        rot_param = np.array([[0, -2 / 9 * np.pi, 9]] * 4)
+        pcs_fitter.set_rotation_parameter('A', 6, rot_param)
+        result1 = pcs_fitter.run_grid_search()
+        pr.disable()
+        pr.print_stats(sort="cumtime")
+        print(result1)
+
+    def pairwise_grid_search():
+        pr.clear()
+        pr.enable()
+        rot_param = np.array([[0, -2 / 6 * np.pi, 6]] * 4)
+        pcs_fitter.set_rotation_parameter('A', 6, rot_param)
+        result2 = pcs_fitter.run_pairwise_grid_search()
+        pr.disable()
+        pr.print_stats(sort="cumtime")
+        print(result2)
+
+    staggered_positions_search()
+    grid_search()
+    pairwise_grid_search()
 
     trk.save_atom_coords()
     trk.print_atom_coords()
-    print(min_pcs, result)
 
 
 if __name__ == '__main__':

@@ -3,19 +3,6 @@ import csv
 from paramagpy import dataparse
 
 
-# class PCSAtom:
-#     def __init__(self, residue, residue_nr, group, atom, pcs):
-#         self.residue = residue
-#         self.residue_nr = residue_nr
-#         self.group = group
-#         self.atom = atom
-#         self.pcs = pcs
-#
-#     def __repr__(self):
-#         return f"PCSAtom<Residue: {self.residue}, Residue #: {self.residue_nr}," \
-#                f" Group: {self.group}, Atom: {self.atom}, PCS: {self.pcs}>"
-
-
 class PCSReader:
     # __result = []
     __values = dataparse.DataContainer(dtype='PCS')

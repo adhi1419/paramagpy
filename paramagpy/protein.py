@@ -519,11 +519,14 @@ class CustomResidue(Residue):
             pcs_calc = self._metal.fast_pcs(coord_matrix)
             pcs_dist = np.linalg.norm(self.pcs_data[1] - pcs_calc)
 
-            if len(self._min_pcs) == top_n and -self._min_pcs[0][0] > pcs_dist:
-                heapq.heappop(self._min_pcs)
-                heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full)))
-            if len(self._min_pcs) < top_n:
-                heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full)))
+            try:
+                if len(self._min_pcs) < top_n or top_n == -1:
+                    heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full), pcs_calc))
+                elif len(self._min_pcs) == top_n and -self._min_pcs[0][0] > pcs_dist:
+                    heapq.heappop(self._min_pcs)
+                    heapq.heappush(self._min_pcs, (-pcs_dist, np.array(self._dihedral_full), pcs_calc))
+            except ValueError:
+                pass
 
     def __get_rot_path(self):
         if self._rot_path is None:

@@ -1,4 +1,5 @@
 import copy as cp
+import heapq
 import warnings
 
 import numpy as np
@@ -1249,12 +1250,13 @@ class PCSToRotamer:
                         print(f"Fitting residue {res_obj} to the input pcs data")
                         print(
                             f"The euclidean distance of the calculated pcs from experimental pcs for this rotamer is"
-                            f" {-result[0][0]:.4f}")
+                            f" {-result[len(result) - 1][0]:.4f}")
                         ret.setdefault(chain, {})[res] = result
 
         return ret
 
     def run_staggered_positions_search(self, chain, residue, delta=0.174533, steps=5):
+        # TODO Documentation
         def rad(deg): return (deg / 180) * np.pi
 
         n = len(CustomResidue.side_chain_lib.get(self.model[chain][residue].get_resname()))
@@ -1270,3 +1272,22 @@ class PCSToRotamer:
             min_pcs = min((-result[chain][residue][0][0], min_pcs[1] + 1, result), min_pcs)
 
         return min_pcs
+
+    def run_pairwise_grid_search(self, top_n=1):
+        # TODO Documentation
+        result = self.run_grid_search(-1)
+        _min_pcs = []
+        for chain in result:
+            for res in result[chain]:
+                _result = result[chain][res]
+                for i in range(len(_result)):
+                    for j in range(i, len(_result)):
+                        pcs_dist = np.linalg.norm(
+                            self.model[chain][res].pcs_data[1] - 0.5 * (_result[i][2] + _result[j][2]))
+                        if len(_min_pcs) == top_n and _min_pcs[0][0] > pcs_dist:
+                            heapq.heappop(_min_pcs)
+                            heapq.heappush(_min_pcs, (pcs_dist, _result[i], _result[j]))
+                        if len(_min_pcs) < top_n:
+                            heapq.heappush(_min_pcs, (pcs_dist, _result[i], _result[j]))
+
+        return _min_pcs

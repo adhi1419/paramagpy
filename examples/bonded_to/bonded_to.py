@@ -47,12 +47,12 @@ def main():
     timer['end_pdb_parser'] = time.perf_counter() * 1E3
 
     res = prot[0]['A'][55]
-
     trk = Tracker(res)
 
     timer['start_atom_linkage'] = time.perf_counter() * 1E3
     trk.print_atom_linkage()
     timer['end_atom_linkage'] = time.perf_counter() * 1E3
+
     trk.save_atom_coords()
 
     # Default: [rad(47.63), rad(162.49), rad(-176.18), rad(141.70)
@@ -60,6 +60,7 @@ def main():
     res.set_dihedral(np.array([rad(170), rad(170), rad(-70), rad(50)]))
     # res.set_dihedral(np.array([-2.0943951023931957, 1.3962634015954627, -2.0943951023932383, 0]))
     timer['end_set_dihedral'] = time.perf_counter() * 1E3
+
     # Will give back original if the below line is executed
     timer['start_set_delta_dihedral'] = time.perf_counter() * 1E3
     # res.set_delta_dihedral(np.array([rad(10), 0, 0, rad(-5)]))
@@ -68,6 +69,7 @@ def main():
     # Full sweep
 
     pr = cProfile.Profile()
+
     pr.enable()
     timer['start_set_delta_dihedral_full'] = time.perf_counter() * 1E3
     rot_param = np.array([[-7 / 9 * np.pi, np.pi, 9] * 4]).reshape(4, 3)
@@ -78,6 +80,7 @@ def main():
 
     trk.save_atom_coords()
     trk.print_atom_coords()
+
     timer['end_program'] = time.perf_counter() * 1E3
 
     # Print benchmark results
