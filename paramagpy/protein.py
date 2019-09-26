@@ -202,7 +202,28 @@ class CustomAtom(Atom):
         return (preFactor * (3. * p1 - p2))
 
     def bonded_to(self, valency=None, recompute=False):
-        # TODO: Documentation
+        """
+        Compute the list of atoms which could be bonded to this atom
+
+        Note: The function doesn't guarantee that the list returned is always correct. Use with caution.
+
+        Parameters
+        ----------
+        valency : int
+            The valency of the atom this function is being called from. If none, it will try to use the
+            default value if it exists. If the atom is charged, please add the charge to valency to get
+            accurate results.
+
+        recompute : bool
+            The list of atoms is only computed the first time and stored for later use. Calls succeeding
+            the first, return the stored value instead. Set this argument to True if you would like to
+            recompute the list.
+
+        Returns
+        -------
+        atoms_bonded_to : list of CustomAtom
+            The list of atoms which could be bonded to this atom
+        """
         return self.parent.bonded_to(self, self.valency if valency is None else valency, recompute)
 
 
@@ -298,7 +319,32 @@ class CustomResidue(Residue):
         self._rot_path = None
 
     def bonded_to(self, source_atom, valency=None, recompute=False):
-        # TODO: Documentation
+        """
+        Compute the list of atoms which could be bonded to the source_atom in this residue
+
+        Note: The function doesn't guarantee that the list returned is always correct. Use with caution.
+
+        Parameters
+        ----------
+        source_atom: CustomAtom
+            An atom part of this residue, the atoms bonded to which are returned
+
+        valency : int
+            The valency of the atom this function is being called from. If none, it will try to use the
+            default value if it exists. If the atom is charged, please add the charge to valency to get
+            accurate results.
+
+        recompute : bool
+            The list of atoms is only computed the first time and stored for later use. Calls succeeding
+            the first, return the stored value instead. Set this argument to True if you would like to
+            recompute the list.
+
+        Returns
+        -------
+        atoms_bonded_to : list of CustomAtom
+            The list of atoms which could be bonded to this atom
+        """
+
         def dist(from_atom):
             return np.abs(from_atom - source_atom)
 
@@ -360,21 +406,22 @@ class CustomResidue(Residue):
         source_atom.bonded_atoms = atoms[:valency]
         return source_atom.bonded_atoms
 
-    """
-    # Can't use this approach as the vector about which the bond is to be rotated changes after
-    # rotation along a different bond
-    #
-    # These vectors represent the bonds (axis of rotation) along which the residue is rotated
-    def rot_vectors(self):
-        if self.get_resname() not in self.side_chain_lib:
-            raise Exception("Residue is not an amino acid, could be a hetero atom")
-        side_chain_atoms = list(map(lambda x: self[x], self.side_chain_lib[self.get_resname()]))
-        side_chain_vectors = list(map(lambda x: x.get_vector(), side_chain_atoms))
-        return np.diff([self['CA'].get_vector()] + side_chain_vectors).tolist()
-    """
-
     def set_dihedral(self, theta_vector):
-        # TODO Documentation
+        """
+        Set the given dihedral angles in the residue. The dihedral angle has to be in the range (-pi, pi].
+        Uses the right-hand rule as looking down from the backbone of the residue. The convention used for
+        finding the dihedral angle about a bond is to find the atom with the highest atomic number attached
+        both the atoms (the bond between whom the dihedral angle is being discussed) and use this as the four
+        atoms for the dihedral calculations. If there is a tie in the highest atomic number, the atom with the
+        highest lexicographical name in the PDB file among these tied atoms is chosen.
+
+        Parameters
+        ----------
+        theta_vector : numpy.ndarray
+         nd array of shape (#bonds on side chain which are rotated)
+            A numpy array corresponding to the dihedral angles which have to be set in the residue
+
+        """
 
         rot_path = self.__get_rot_path()
 
@@ -388,9 +435,77 @@ class CustomResidue(Residue):
         delta_theta_vector = theta_vector - current_dihedral_vector
         self.set_delta_dihedral(delta_theta_vector)
 
-    def set_delta_dihedral(self, delta_theta_vector):
-        # TODO Documentation
+    @staticmethod
+    def get_dihedral(atom_a, atom_b):
+        """
+        Get the given dihedral angles in the residue. The dihedral angle has to be in the range (-pi, pi].
+        Uses the right-hand rule as looking down from the backbone of the residue. The convention used for
+        finding the dihedral angle about the bond atom_a and atom_b is to find the atom with the highest
+        atomic number attached both the atoms and use this as the four atoms for the dihedral calculations.
+        If there is a tie in the highest atomic number, the atom with the highest lexicographical name in
+        the PDB file among these tied atoms is chosen.
 
+        Parameters
+        ----------
+        atom_a : CustomAtom
+            Atom from which the dihedral angle is being measured.
+        atom_b : CustomAtom
+            Atom from which the dihedral angle is being measured.
+
+        Returns
+        -------
+        dihedral_angle : float
+            The dihedral angle in radians
+
+        """
+        atom_a_bonded_to = atom_a.bonded_to().copy()
+        atom_b_bonded_to = atom_b.bonded_to().copy()
+
+        # Error Handling
+        if atom_a not in atom_b_bonded_to or atom_b not in atom_a_bonded_to:
+            raise AttributeError("Atom A and atom B have to bonded to each other for this to work")
+
+        atom_a_bonded_to.remove(atom_b)
+        atom_b_bonded_to.remove(atom_a)
+
+        list.sort(atom_a_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
+        list.sort(atom_b_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
+
+        if not atom_a_bonded_to:
+            raise Exception(f"Could not find the neighbors of {atom_a} to calculate the dihedral angle")
+
+        if not atom_b_bonded_to:
+            raise Exception(f"Could not find the neighbors of {atom_b} to calculate the dihedral angle")
+
+        return CustomResidue.__calc_dihedral(atom_a_bonded_to[0].coord, atom_a.coord, atom_b.coord,
+                                             atom_b_bonded_to[0].coord)
+
+    def get_dihedral_full(self):
+        """
+        Get the list of all the dihedral angle (in radians) in the residue
+
+        Returns
+        -------
+        dihedral_angle : float
+            List of all the dihedral angle (in radians) in the residue
+
+        """
+        rot_path = self.__get_rot_path()
+        return [CustomResidue.get_dihedral(rot_path[i], rot_path[i + 1]) for i in range(len(rot_path) - 1)]
+
+    def set_delta_dihedral(self, delta_theta_vector):
+        """
+        Increase each dihedral angle by the corresponding delta_theta value. Increase in angle is according
+        to the right-hand rule looking from the back-bone of the residue.
+
+        Parameters
+        ----------
+        delta_theta_vector : numpy.ndarray
+            ndarray of shape (# bonds on side chain which are rotated)
+            A numpy array corresponding to the dihedral angles (in radians) which have to be set
+            in the residue
+
+        """
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
         # what is to be done
         if self.get_resname() not in CustomResidue.side_chain_lib:
@@ -398,7 +513,7 @@ class CustomResidue(Residue):
 
         # If there is an amine-H, don't rotate it and make it a part of the backbone
         back_bone_atoms = set(map(lambda x: self[x], self.back_bone))
-        iter_bb_atoms = back_bone_atoms.copy()
+        iter_bb_atoms = set(back_bone_atoms)
 
         for atom in iter_bb_atoms:
             for nbr in atom.bonded_to():
@@ -431,8 +546,24 @@ class CustomResidue(Residue):
             self.__rotate_atoms(atoms_position, i, q, rot_path[i].coord)
 
     def grid_search_rotamer(self, rotation_param, fit_pcs=False, top_n=1):
-        # TODO Documentation
+        """
+        Perform a grid search generating rotamers using the parameters given by rotation_param
 
+        Parameters
+        ----------
+        rotation_param : numpy.ndarray
+            ndarray of shape (# bonds on side chain which are rotated, 3)
+            For each bond, 3 parameters are required. The starting dihedral angle, the ending dihedral angle
+            and the number of steps between start and finish (including the start and end angle)
+
+        fit_pcs : bool
+            If True, the function tries to calculate the rotamer with PCS values closest to the experimental
+            PCS values (see :py:meth: `paramagpy.protein.CustomStructure.parse`)
+
+        top_n : int
+            Returns the top_n rotamers which fits best to the experimental PCS values
+
+        """
         # Error Handling - HETATM seems to be causing a problem, raising an exception until we know for sure
         # what is to be done
         if self.get_resname() not in CustomResidue.side_chain_lib:
@@ -478,7 +609,6 @@ class CustomResidue(Residue):
         return self._min_pcs if fit_pcs and len(self._min_pcs) > 0 else None
 
     def __grid_search_rotamer_helper(self, q, i, rotation_param, rot_path, atoms_position, fit_pcs=False, top_n=1):
-        # TODO Documentation
         _param = rotation_param[i]
         for j in range(1, int(_param[2])):
             if i + 1 < len(rot_path) - 1:
@@ -500,7 +630,6 @@ class CustomResidue(Residue):
             self.__rotate_atoms(atoms_position, i, q_reset, rot_path[i].coord, fit_pcs, top_n)
 
     def __rotate_atoms(self, atoms_position, i, q, origin, fit_pcs=False, top_n=1):
-        # TODO Documentation
         _q = quat.as_quat_array(np.empty(4))
         _q.real = 0
         for atom in atoms_position:
@@ -534,13 +663,8 @@ class CustomResidue(Residue):
                 map(lambda x: self[x], CustomResidue.side_chain_lib[self.get_resname()]))
         return self._rot_path
 
-    def get_dihedral_full(self):
-        rot_path = self.__get_rot_path()
-        return [CustomResidue.get_dihedral(rot_path[i], rot_path[i + 1]) for i in range(len(rot_path) - 1)]
-
     @staticmethod
     def __get_angle_increment(start, stop, steps):
-        # TODO Documentation
         if start == stop or int(steps) <= 1:
             return 0
         diff = (stop - start)
@@ -550,7 +674,6 @@ class CustomResidue(Residue):
 
     @staticmethod
     def __rot_quat(theta, vector):
-        # TODO: Documentation
         v = vector / np.linalg.norm(vector)
         s = np.sin(theta / 2)
         c = np.cos(theta / 2)
@@ -558,30 +681,6 @@ class CustomResidue(Residue):
         _q.real = c
         _q.imag = v * s
         return _q
-
-    @staticmethod
-    def get_dihedral(atom_a, atom_b):
-        atom_a_bonded_to = atom_a.bonded_to().copy()
-        atom_b_bonded_to = atom_b.bonded_to().copy()
-
-        # Error Handling
-        if atom_a not in atom_b_bonded_to or atom_b not in atom_a_bonded_to:
-            raise AttributeError("Atom A and atom B have to bonded to each other for this to work")
-
-        atom_a_bonded_to.remove(atom_b)
-        atom_b_bonded_to.remove(atom_a)
-
-        list.sort(atom_a_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
-        list.sort(atom_b_bonded_to, key=attrgetter('atomic_number', 'name'), reverse=True)
-
-        if not atom_a_bonded_to:
-            raise Exception(f"Could not find the neighbors of {atom_a} to calculate the dihedral angle")
-
-        if not atom_b_bonded_to:
-            raise Exception(f"Could not find the neighbors of {atom_b} to calculate the dihedral angle")
-
-        return CustomResidue.__calc_dihedral(atom_a_bonded_to[0].coord, atom_a.coord, atom_b.coord,
-                                             atom_b_bonded_to[0].coord)
 
     @staticmethod
     def __calc_dihedral(v1, v2, v3, v4):

@@ -49,15 +49,15 @@ def fit_metal():
     parsed_data = prot.parse(pcs_data_exp)
 
     # Set the starting position to an atom close to the metal
-    mStart = metal.Metal(position=prot[0]['A'][57]['CB'].position)
+    m_start = metal.Metal(position=prot[0]['A'][57]['CB'].position)
 
-    # Calculate an initial tensor from an SVD gridsearch
-    mGuess, calc, qfac = fit.svd_gridsearch_fit_metal_from_pcs([mStart], [parsed_data], radius=10, points=10)
+    # Calculate an initial tensor from an SVD grid search
+    m_guess, calc, q_fac = fit.svd_gridsearch_fit_metal_from_pcs([m_start], [parsed_data], radius=10, points=10)
 
     # Refine the tensor using non-linear regression
-    mFit, calc, qfac = fit.nlr_fit_metal_from_pcs(mGuess, [parsed_data])
-    mFit[0].save('s57c_1ubq_PCS_tensor.txt')
-    print(mGuess, calc, qfac)
+    m_fit, calc, q_fac = fit.nlr_fit_metal_from_pcs(m_guess, [parsed_data])
+    m_fit[0].save('s57c_1ubq_PCS_tensor.txt')
+    print(m_guess, calc, q_fac)
 
 
 def fit_rotamer():
